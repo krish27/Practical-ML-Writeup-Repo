@@ -1,0 +1,122 @@
+---
+title: "Human Self-Movement Activity Recognition Project"
+author: "Srikrishna Prasad"
+date: "24/12/2015"
+output: html_document
+---
+
+Introduction
+------------
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset). 
+
+The data is loaded like this:
+
+```{r,message=FALSE}
+# Libraries needed for the whole study
+library(ggplot2)
+library(caret)
+library(dplyr)
+library(randomForest)
+library(doMC)
+registerDoMC(cores=4)
+```
+```{r}
+data <- tbl_df(read.csv("pml-training.csv"))
+dim(data)
+```
+
+We can see the dataset has 160 variables, which is really large.
+
+Cleaning the data
+-----------------
+
+First, the data contained some division by zero errors: these have been replaced by NA using a standard text editor.
+
+Then, I removed variables with mostly NA. For this, I create a list of columns I want to keep:
+
+```{r}
+keep_columns <- is.na(data) %>%
+  apply(2, sum) %>%
+  (function(m) { m[m < dim(data)[1]/2] }) %>%
+  names
+```
+
+The last cleaning step consists of removing columns we do not want to train on because they do not make sense for the project.
+The first obvious outliers are `X`, `user_name` and the timestamps. For the timestamps, at most we would want to use a time span
+from the start of the exercise, but never the raw timestamps. A bit less obvious, the `new_window` and `num_window`
+variables indicate when the averaging is done and are probably not very useful in themselved.
+
+```{r}
+to_remove <- c("X", "user_name", "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", "new_window", "num_window")
+keep_columns <- keep_columns[which(!keep_columns %in% to_remove)]
+clean_data <- data[keep_columns]
+dim(clean_data)
+```
+
+Now, we have only 53 variable lefts, which is more reasonnable, although still very large.
+It is worth nothing that, at that stage, `classe` is the only factor left in the dataset.
+
+Cross-Validation
+----------------
+
+For the cross validation, we are going to split the samples along the `classe` variable to ensure we have representative of all the classes in the test set. As we have a lot of data and variables, we are going to split the dataset halfway into a training and testing dataset:
+
+```{r}
+inTrain <- createDataPartition(clean_data$classe, p=0.5, list=FALSE)
+training <- clean_data[inTrain,]
+testing <- clean_data[-inTrain,]
+```
+
+However, given the time needed to create a single estimator, we are not going to use this for model selection. It is worth noting that the caret random forest method will itself use bootstrapping to select the best tree.
+
+Preprocessing of the data
+-------------------------
+
+To reduce the number of variables, we use PC analysis, keeping 95% of the variability, and put back the classes:
+
+```{r}
+numTraining <- select(training, -classe)
+preProcPC <- preProcess(numTraining, method=c("pca"), thresh=0.9)
+trainPC <- preProcPC %>%
+  predict(numTraining) %>%
+  mutate(classe=training$classe)
+```
+
+Using the Random Forest
+-----------------------
+
+We now use the main classification algorithm: the random forest.
+
+```{r}
+PCForestFit <- train(classe ~ ., data=trainPC, method="rf", prox=TRUE)
+```
+
+Accuracy predictions
+--------------------
+To evaluate the accuracy, we are going to use the testing subset of the original data, and assume all the outcome are equiprobable:
+
+```{r}
+PCtesting <- predict(preProcPC, select(testing, -classe))
+predPCForest <- predict(PCForestFit, PCtesting)
+confusionForest <- confusionMatrix(predPCForest, testing$classe, prevalence=c(A=0.2, B=0.2, C=0.2, D=0.2, E=0.2))
+print(confusionForest)
+```
+
+The interesting line is the Positive Predictive Value, which tells us how likely is the answer is of the predicted class, depending on the prediction. The model then gives us the predicted overall accuracy with a confidence interval:
+
+```{r}
+confusionForest$overall[c("Accuracy", "AccuracyLower", "AccuracyUpper")]
+```
+
+Predictions on the testing dataset
+----------------------------------
+
+```{r}
+test_columns <- keep_columns[which(keep_columns != "classe")]
+test <- tbl_df(read.csv("pml-testing.csv"))[test_columns]
+
+testPC <- predict(preProcPC, test)
+testPredictions <- predict(PCForestFit, testPC)
+print(testPredictions)
+```
